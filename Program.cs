@@ -1,7 +1,4 @@
 ﻿/*
-coincident
-https://discord.com/invite/nYDuB46
-
 This is a proof-of-concept for DSDA Doom, from
 coincident's impping stream comments about
 normalizing audio between tracks.  Is is 
@@ -163,3 +160,4 @@ namespace ReplayGainMidi
 
     }
 }
+
