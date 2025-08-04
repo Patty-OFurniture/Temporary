@@ -2,15 +2,30 @@
 /*
 This is a proof-of-concept for DSDA Doom, from
 coincident's impping stream comments about
-normalizing audio between tracks.  Is is 
-based on the restrictions of how WAD files work
-i.e. Loading lumps in memory.  Coin mentioned
-he had found ReplayGain for MIDI, which I
-could not find.  That would solve the problem of
-streaming while using local .mid files or
-audio paks.
+normalizing audio between tracks.  It is based 
+on the restrictions of how WAD files work i.e. 
+Loading lumps in memory.  I could not find
+ReplayGain for MIDI, but foobar2000 does have 
+an add-on (component) that allows reading and 
+rendering of MIDI files.  ReplayGain data is not 
+stored in the file, rather in a metadata database.
+APETAGEX format.  The component renders the sound,
+with the current settings, and foobar2000 simply 
+applies ReplayGain to the output samples.
 
-The problem is still that a new WAD would require
+foobar2000 currently (since 1.1.6) defaults to 
+EBU R-128, but can also do "classic" ReplayGain
+analysis.  I found ITU-R_468 first, so that is 
+implemented.
+
+EBU R 128 aka ITU-R BS.1770 seems to require samples
+to estimate loudness, including windowing functions
+(oversampling).  So a loudness curve like ITU-R_468
+is probably a better choice for on-demand MIDI
+loudness.
+
+Even if you could use foobar2000 as the sound player,
+the problem is still that a new WAD would require
 extracting the MIDI lumps, analyzing, and replacing
 those lumps. So this is an example of gathering
 events in memory, grouping them by event time,
@@ -91,6 +106,10 @@ namespace ReplayGainMidi
                 {
                     DumpMidi(file);
                 }
+                foreach (var file in Directory.GetFiles(args[0], "*.mus"))
+                {
+                    DumpMidi(file);
+                }
             }
             else if (File.Exists(args[0]))
             {
@@ -106,6 +125,8 @@ namespace ReplayGainMidi
 
         static void DumpMidi(string file)
         {
+            var then = DateTime.Now;
+
             Console.WriteLine($"Processing: {file}");
 
             var midiFile = MidiFile.Read(file);
@@ -118,6 +139,7 @@ namespace ReplayGainMidi
             // midiFile.Sanitize();
 
             var volumes = new List<int>();
+            var volumesr468 = new List<double>();
 
             var chords = midiFile.GetChords();
 
@@ -129,33 +151,48 @@ namespace ReplayGainMidi
                 //    System.Diagnostics.Debugger.Break();
 
                 int volume = 0;
+                int volume468 = 0;
                 foreach (var c in chord)
                 {
                     foreach (var n in c.Notes)
                     {
                         volume += n.Velocity;
+
+                        var freq = MidiNumberToFrequency(n.NoteNumber);
+                        volume468 += (int) Math.Round(n.Velocity * r468(freq, "1khz", "factor"));
                     }
                 }
+
                 //Console.WriteLine(volume.ToString());
 
                 if (volume < 1)
                     System.Diagnostics.Debugger.Break();
 
                 volumes.Add(volume);
+                volumesr468.Add(volume468);
             }
+
+            var now = DateTime.Now;
+            var elapsed = now - then;
 
             Console.WriteLine($"AVG:{volumes.Average()}");
             Console.WriteLine($"Max:{volumes.Max()}");
             Console.WriteLine($"Min:{volumes.Min()}");
             Console.WriteLine($"RMS:{RMS_Value(volumes)}");
-            Console.WriteLine();
 
+            Console.WriteLine($"R468 AVG:{volumesr468.Average()}");
+            Console.WriteLine($"R468 Max:{volumesr468.Max()}");
+            Console.WriteLine($"R468 Min:{volumesr468.Min()}");
+            Console.WriteLine();
+            Console.WriteLine($"Elapsed: {elapsed.TotalMilliseconds} ms");
+            Console.WriteLine();
             // CsvSerializer.SerializeToCsv(midiFile, file + ".csv", false);
         }
 
 
         // https://eddiejackson.net/wp/?page_id=20156
         // Root Mean Square  
+        // slightly modified
         static float RMS_Value(List<int> arr, int n = 0)
         {
             if (n == 0)
@@ -183,6 +220,7 @@ namespace ReplayGainMidi
 
         // in case another reference pitch is required
         const double A4Frequency = 440.0;
+        // cache calculations
         static Dictionary<int, double> Frequencies = new();
 
         //  the note A4 is 69 and increases by one for each equal tempered semitone
@@ -208,10 +246,14 @@ namespace ReplayGainMidi
 
             var filtered = r468(freq, "1khz", "db");
 
-            // 1khz means 1kHz and 12.5 kHz are zeros
+            // 1khz means 1kHz and 12.5 kHz are zeros, factor = 1.0
             freq = 1000.0;
             filtered = r468(freq, "1khz", "db");
             if (Math.Round(filtered, 1) != 0.0)
+                throw new Exception("ITU-R_468 result unexpected");
+
+            filtered = r468(freq, "1khz", "factor");
+            if (Math.Round(filtered, 1) != 1.0)
                 throw new Exception("ITU-R_468 result unexpected");
 
             freq = 12500;
@@ -219,10 +261,27 @@ namespace ReplayGainMidi
             if (Math.Round(filtered, 1) != 0.0)
                 throw new Exception("ITU-R_468 result unexpected");
 
-            // extreme example
+            filtered = r468(freq, "1khz", "factor");
+            if (Math.Round(filtered, 1) != 1.0)
+                throw new Exception("ITU-R_468 result unexpected");
+
+            // extreme examples
             freq = 31500.0;
             filtered = r468(freq, "1khz", "db");
             if (Math.Round(filtered, 1) != (-42.7))
+                throw new Exception("ITU-R_468 result unexpected");
+
+            filtered = r468(freq, "1khz", "factor");
+            if (Math.Round(filtered, 1) != 0.0)
+                throw new Exception("ITU-R_468 result unexpected");
+
+            freq = 6300;
+            filtered = r468(freq, "1khz", "db");
+            if (Math.Round(filtered, 1) != 12.2)
+                throw new Exception("ITU-R_468 result unexpected");
+
+            filtered = r468(freq, "1khz", "factor");
+            if (Math.Round(filtered, 1) != 4.1)
                 throw new Exception("ITU-R_468 result unexpected");
         }
 #endif
@@ -234,6 +293,7 @@ namespace ReplayGainMidi
         // this is not implemented, but it is tested.  I believe
         // the "factor" return should give a multiplier, but the test data
         // I have independent of the implementation is in dB.
+        // Also known as: "CCIR 468-4" "ITU-R BS.468-4"
 
         static double r468(double frequency_hz, string khz_option, string returns)
         {
